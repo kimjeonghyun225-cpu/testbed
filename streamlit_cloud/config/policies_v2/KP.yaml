@@ -1,0 +1,44 @@
+project: KP
+version: v2
+
+candidate_filter:
+  platform: android,ios
+  required_fields: [rank, product_name, cpu, gpu, ram_gb, display_w, display_h]
+  availability:
+    usable_only: true
+    rentable_only: false
+
+manufacturer_policy:
+  within_rank:
+    mode: soft_dedupe
+    penalty_weight: 0.5
+
+dedupe:
+  within_rank:
+    # 대표성: (cpu,gpu,ram_gb) 프로파일 대표 + 추가 제약(제품명 1개 제한)
+    key: [cpu, gpu, ram_gb]
+    max_per_product_name: 1
+    allow_duplicates_if_differs_by:
+      - display_bucket
+      - form_factor
+      - target_market
+
+diversity:
+  within_rank:
+    must_cover:
+      - cpu_family
+    must_include_if_available:
+      form_factor: [pad]
+    optional_axes:
+      - display_bucket
+      - form_factor
+      - target_market
+
+tie_breakers:
+  - no_prefix_priority:
+      android: [AP, AT, R]
+      ios: [IP, IT, R]
+  - newest_release_year
+  - gpu_family_priority: [adreno, immortalis, mali]
+
+
