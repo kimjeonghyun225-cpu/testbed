@@ -19,6 +19,15 @@ class AvailabilityFilter:
 class CandidateFilter:
     platform: str = "android"
     required_fields: tuple[str, ...] = ()
+    # string allow-list filters (case-insensitive exact match):
+    # e.g. {manufacturer: [SAMSUNG], architecture: [64bit], display_bucket: [tall_fhd]}
+    include_values: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # string "contains" filters (case-insensitive substring match):
+    # e.g. {gpu: [powervr]} will keep rows whose gpu contains "powervr"
+    include_contains: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # numeric minimum filters (inclusive):
+    # e.g. {release_year: 2024, os_ver: 15}
+    min_values: dict[str, float] = field(default_factory=dict)
     # numeric ranges filter (inclusive): e.g. {ram_gb: [2, 3]}
     # values are stored as dict[col] = (min, max)
     numeric_ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
@@ -142,9 +151,55 @@ def load_policy_v2(path: str | Path) -> PolicyV2:
                 except Exception:
                     continue
 
+    # include_values (optional)
+    iv_obj = _get(obj, "candidate_filter.include_values", {}) or {}
+    include_values: dict[str, tuple[str, ...]] = {}
+    if isinstance(iv_obj, dict):
+        for k, v in iv_obj.items():
+            kk = str(k or "").strip()
+            if not kk:
+                continue
+            if isinstance(v, (list, tuple)):
+                include_values[kk] = tuple(str(x).strip() for x in v if str(x).strip())
+            else:
+                sv = str(v).strip()
+                if sv:
+                    include_values[kk] = (sv,)
+
+    # include_contains (optional)
+    ic_obj = _get(obj, "candidate_filter.include_contains", {}) or {}
+    include_contains: dict[str, tuple[str, ...]] = {}
+    if isinstance(ic_obj, dict):
+        for k, v in ic_obj.items():
+            kk = str(k or "").strip()
+            if not kk:
+                continue
+            if isinstance(v, (list, tuple)):
+                include_contains[kk] = tuple(str(x).strip() for x in v if str(x).strip())
+            else:
+                sv = str(v).strip()
+                if sv:
+                    include_contains[kk] = (sv,)
+
+    # min_values (optional)
+    mv_obj = _get(obj, "candidate_filter.min_values", {}) or {}
+    min_values: dict[str, float] = {}
+    if isinstance(mv_obj, dict):
+        for k, v in mv_obj.items():
+            kk = str(k or "").strip()
+            if not kk:
+                continue
+            try:
+                min_values[kk] = float(v)
+            except Exception:
+                continue
+
     cf = CandidateFilter(
         platform=str(_get(obj, "candidate_filter.platform", "android") or "android"),
         required_fields=tuple(str(x) for x in (_get(obj, "candidate_filter.required_fields", []) or [])),
+        include_values=include_values,
+        include_contains=include_contains,
+        min_values=min_values,
         numeric_ranges=numeric_ranges,
         availability=av,
     )
@@ -425,6 +480,57 @@ def normalize_df_for_policy_v2(df: pd.DataFrame) -> pd.DataFrame:
         out["product_name"] = out["product_name"].fillna("").astype(str).str.strip()
     if "brand" in out.columns:
         out["brand"] = out["brand"].fillna("").astype(str).str.strip()
+    # manufacturer: best-effort from common columns (제조사/Manufacturer) or brand
+    if "manufacturer" not in out.columns:
+        manu_col = _first_col(["manufacturer", "Manufacturer", "제조사", "raw__제조사"])
+        if manu_col:
+            out["manufacturer"] = out[manu_col].fillna("").astype(str).str.strip()
+        elif "brand" in out.columns:
+            out["manufacturer"] = out["brand"].fillna("").astype(str).str.strip()
+        else:
+            out["manufacturer"] = ""
+    else:
+        out["manufacturer"] = out["manufacturer"].fillna("").astype(str).str.strip()
+
+    # architecture: best-effort from common columns
+    if "architecture" not in out.columns:
+        arch_col = _first_col(["architecture", "arch", "아키텍처", "raw__아키텍처"])
+        if arch_col:
+            out["architecture"] = out[arch_col].fillna("").astype(str).str.strip()
+        else:
+            out["architecture"] = ""
+    else:
+        out["architecture"] = out["architecture"].fillna("").astype(str).str.strip()
+
+    # os_ver (numeric): best-effort parse from OS Ver / os_ver columns
+    if "os_ver" not in out.columns:
+        osv_col = _first_col(["OS Ver", "OSVer", "os_ver", "OS Version", "OS_VERSION"])
+        if osv_col:
+            s = out[osv_col].fillna("").astype(str).str.strip()
+            # accept "15", "15.1", "iOS 17.2", "Android 14"
+            out["os_ver"] = pd.to_numeric(s.str.extract(r"(\d+(\.\d+)?)")[0], errors="coerce")
+        else:
+            out["os_ver"] = pd.Series([pd.NA] * len(out), index=out.index)
+    else:
+        out["os_ver"] = pd.to_numeric(out["os_ver"], errors="coerce")
+
+    # display (string): normalize to "W x H" if possible
+    if "display" not in out.columns:
+        try:
+            w = pd.to_numeric(out.get("display_w", pd.Series([pd.NA] * len(out), index=out.index)), errors="coerce")
+            h = pd.to_numeric(out.get("display_h", pd.Series([pd.NA] * len(out), index=out.index)), errors="coerce")
+            disp = []
+            for ww, hh in zip(w.tolist(), h.tolist()):
+                if pd.isna(ww) or pd.isna(hh):
+                    disp.append("")
+                else:
+                    disp.append(f"{int(ww)} x {int(hh)}")
+            out["display"] = pd.Series(disp, index=out.index)
+        except Exception:
+            out["display"] = ""
+    else:
+        out["display"] = out["display"].fillna("").astype(str).str.strip()
+
     if "device_id" in out.columns:
         out["device_id"] = out["device_id"].fillna("").astype(str).str.strip()
 

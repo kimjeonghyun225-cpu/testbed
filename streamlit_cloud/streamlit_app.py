@@ -905,18 +905,53 @@ def _policy_editor_page(*, policy_files: list[Path], selected_policy: Path) -> N
         st.code(
             "\n".join(
                 [
-                    "목표: QA 디바이스 추천 v2 정책 YAML을 만든다.",
+                    "너는 'QA 디바이스 추천 v2 정책'을 YAML로 작성하는 도우미다.",
+                    "출력은 반드시 YAML만(설명/주석/코드블럭 금지).",
                     "",
-                    "요구사항을 아래 항목으로 써줘:",
-                    "- 프로젝트: KP/KRJP/PALM",
-                    "- 플랫폼: android",
+                    "[사용자가 YAML로 설정할 수 있는 항목(지원됨)]",
+                    "- project, version",
+                    "- candidate_filter:",
+                    "  - platform: android | ios | android,ios",
+                    "  - required_fields: [rank, product_name, cpu, ram_gb, display_w, display_h ...]",
+                    "  - availability: {usable_only: true/false, rentable_only: true/false}",
+                    "  - numeric_ranges: {ram_gb: [2, 3], release_year: [2023, 2026] ...}",
+                    "  - min_values: {release_year: 2024, os_ver: 15 ...}",
+                    "  - include_values: {manufacturer: [SAMSUNG], architecture: [64bit], display_bucket: [tall_fhd] ...}",
+                    "  - include_contains: {gpu: [powervr], note: [india] ...}  # 대소문자 무시 부분 포함",
+                    "- dedupe.within_rank:",
+                    "  - key: [cpu, ram_gb]  # 중복 제거 기준(필요 시 display_bucket 추가 가능)",
+                    "  - max_per_product_name: 1",
+                    "  - allow_duplicates: true/false",
+                    "  - max_duplicates_per_profile: 2",
+                    "  - allow_duplicates_if_differs_by: [display_bucket, form_factor, target_market]",
+                    "- diversity.within_rank:",
+                    "  - must_cover: [cpu_family, gpu_family ...]",
+                    "  - optional_axes: [display_bucket, form_factor, target_market ...]",
+                    "- manufacturer_policy.within_rank:",
+                    "  - mode: off | soft_dedupe",
+                    "  - penalty_weight: 0.0~1.0",
+                    "- tie_breakers: (순서가 우선순위)",
+                    "  - {no_prefix_priority: {android: [AP, AT, R], ios: [IP, IT, R]}}",
+                    "  - newest_release_year",
+                    "  - higher_display_resolution",
+                    "  - {gpu_family_priority: [adreno, immortalis, mali]}",
+                    "  - {stability_anchor: true}",
+                    "- focus: {preferred_ranks: [D, C, B]}  # 선택",
+                    "",
+                    "[주의: YAML이 아닌 UI에서만 설정되는 것(정책 항목 아님)]",
+                    "- 제외할 타겟 국가(멀티셀렉트), 제외할 NOTE(멀티셀렉트)",
+                    "- 필수 디바이스 No, 직전 버전 제외 No",
+                    "",
+                    "[요구사항 입력 템플릿]",
+                    "- 프로젝트: KP|KRJP|PALM",
+                    "- 플랫폼: android|ios|android,ios",
                     "- Rank별 목표 수량 예시",
-                    "- 중복제거(기본): (cpu,gpu,ram_gb) 프로파일 대표",
-                    "- 추가 커버리지: diversity.must_cover (예: cpu_family, gpu_family, display_bucket 등)",
-                    "- 제조사 정책: manufacturer_policy.within_rank.mode=soft_dedupe, penalty_weight=0.5",
-                    "- tie_breakers: newest_release_year 등",
-                    "",
-                    "출력: v2 정책 YAML만(설명 금지).",
+                    "- (선택) 후보 필터 조건:",
+                    "  - 제조사 include, 아키텍처 include, 출시년도 최소, OS 버전 최소, 특정 GPU 문자열 포함 등",
+                    "- 중복 제거(dedupe) 기준: 예) key=[cpu, ram_gb]",
+                    "- 다양성(diversity): must_cover/optional_axes",
+                    "- 제조사 정책(manufacturer_policy): soft_dedupe 등",
+                    "- tie_breakers 우선순위",
                 ]
             ),
             language="text",
@@ -1005,22 +1040,7 @@ def _policy_editor_page(*, policy_files: list[Path], selected_policy: Path) -> N
     with right:
         st.subheader("정책 미리보기")
         st.code(str(st.session_state.get("policy_yaml_text", "")), language="yaml")
-        try:
-            obj = yaml.safe_load(str(st.session_state.get("policy_yaml_text", "")))
-            if isinstance(obj, dict):
-                st.markdown("#### 요약(자동)")
-                st.write(
-                    {
-                        "project": obj.get("project"),
-                        "candidate_filter": obj.get("candidate_filter"),
-                        "dedupe": obj.get("dedupe"),
-                        "diversity": obj.get("diversity"),
-                        "manufacturer_policy": obj.get("manufacturer_policy"),
-                        "tie_breakers": obj.get("tie_breakers"),
-                    }
-                )
-        except Exception:
-            pass
+        # (요청) '요약(자동)' 출력 제거
 
 
 def _run() -> None:
@@ -1040,36 +1060,34 @@ def _run() -> None:
     load_default_env(PROJECT_ROOT, override=False)
 
     # --- API 연결 설정(세션/저장) ---
-    st.sidebar.header("API 연결 설정(세션/저장)")
-    local_env_path = PROJECT_ROOT / "local.env"
-    existing = _read_env_kv(local_env_path)
+    st.sidebar.header("API 연결 설정(세션)")
 
     with st.sidebar.expander("OpenAI / Jira 키 설정", expanded=False):
-        st.caption("세션 적용: 현재 실행 중인 Streamlit 프로세스에만 반영됩니다. 저장을 켜면 local.env에 기록됩니다.")
+        st.caption("세션 적용: 현재 실행 중인 Streamlit 프로세스에만 반영됩니다. (Streamlit Cloud에서는 Secrets 사용 권장)")
 
         openai_key = st.text_input(
             "OPENAI_API_KEY",
-            value=os.getenv("OPENAI_API_KEY") or existing.get("OPENAI_API_KEY", ""),
+            value=os.getenv("OPENAI_API_KEY") or "",
             type="password",
         )
         openai_model = st.text_input(
             "OPENAI_MODEL(선택)",
-            value=os.getenv("OPENAI_MODEL") or existing.get("OPENAI_MODEL", "gpt-4.1-mini"),
+            value=os.getenv("OPENAI_MODEL") or "gpt-4.1-mini",
         )
 
         st.divider()
         jira_base = st.text_input(
             "JIRA_BASE_URL(선택)",
-            value=os.getenv("JIRA_BASE_URL") or existing.get("JIRA_BASE_URL", ""),
+            value=os.getenv("JIRA_BASE_URL") or "",
             placeholder="https://xxx.atlassian.net",
         )
         jira_email = st.text_input(
             "JIRA_EMAIL(선택)",
-            value=os.getenv("JIRA_EMAIL") or existing.get("JIRA_EMAIL", ""),
+            value=os.getenv("JIRA_EMAIL") or "",
         )
         jira_token = st.text_input(
             "JIRA_API_TOKEN(선택)",
-            value=os.getenv("JIRA_API_TOKEN") or existing.get("JIRA_API_TOKEN", ""),
+            value=os.getenv("JIRA_API_TOKEN") or "",
             type="password",
         )
 
@@ -1077,9 +1095,7 @@ def _run() -> None:
         st.session_state.setdefault("api_status", "미적용")
         st.info(f"상태: {st.session_state.get('api_status')}")
 
-        save_local = st.checkbox("local.env에 저장", value=True)
-        c_ap1, c_ap2 = st.columns(2)
-        if c_ap1.button("세션 적용", use_container_width=True):
+        if st.button("세션 적용", use_container_width=True):
             if _safe_str(openai_key):
                 os.environ["OPENAI_API_KEY"] = openai_key.strip()
             if _safe_str(openai_model):
@@ -1091,27 +1107,9 @@ def _run() -> None:
             if _safe_str(jira_token):
                 os.environ["JIRA_API_TOKEN"] = jira_token.strip()
 
-            if save_local:
-                _write_env_kv(
-                    local_env_path,
-                    {
-                        "OPENAI_API_KEY": openai_key.strip(),
-                        "OPENAI_MODEL": openai_model.strip(),
-                        "JIRA_BASE_URL": jira_base.strip(),
-                        "JIRA_EMAIL": jira_email.strip(),
-                        "JIRA_API_TOKEN": jira_token.strip(),
-                    },
-                )
-                # healthcheck
-                ok, msg = _openai_healthcheck(openai_key)
-                st.session_state["api_status"] = "정상" if ok else f"비정상({msg})"
-                st.success("세션 적용 + local.env 저장 완료")
-            else:
-                ok, msg = _openai_healthcheck(openai_key)
-                st.session_state["api_status"] = "정상" if ok else f"비정상({msg})"
-                st.success("세션 적용 완료(저장은 안 함)")
-            st.rerun()
-        if c_ap2.button("local.env 다시 읽기", use_container_width=True):
+            ok, msg = _openai_healthcheck(openai_key)
+            st.session_state["api_status"] = "정상" if ok else f"비정상({msg})"
+            st.success("세션 적용 완료")
             st.rerun()
 
     st.sidebar.divider()

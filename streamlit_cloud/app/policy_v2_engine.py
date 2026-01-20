@@ -412,6 +412,77 @@ def _apply_candidate_filter(df: pd.DataFrame, policy: PolicyV2, logs: list[str])
             after = int(len(out))
             logs.append(f"[numeric_ranges] {col} in [{lo}, {hi}] kept={after} dropped={before-after}")
 
+    # include_values (case-insensitive exact match)
+    iv = getattr(policy.candidate_filter, "include_values", {}) or {}
+    if isinstance(iv, dict) and iv:
+        for col, vals in iv.items():
+            col = str(col or "").strip()
+            if not col:
+                continue
+            # alias support
+            if col == "brand" and "manufacturer" in out.columns:
+                col = "manufacturer"
+            if col not in out.columns:
+                logs.append(f"[warn] candidate_filter.include_values set but missing column={col}; skip")
+                continue
+            want = {str(x).strip().lower() for x in (vals or ()) if str(x).strip()}
+            if not want:
+                continue
+            before = int(len(out))
+            s = out[col].fillna("").astype(str).str.strip().str.lower()
+            out = out[s.isin(want)].copy()
+            after = int(len(out))
+            logs.append(f"[include_values] {col} in {sorted(want)[:10]}{'...' if len(want) > 10 else ''} kept={after} dropped={before-after}")
+
+    # include_contains (case-insensitive substring match)
+    ic = getattr(policy.candidate_filter, "include_contains", {}) or {}
+    if isinstance(ic, dict) and ic:
+        for col, vals in ic.items():
+            col = str(col or "").strip()
+            if not col:
+                continue
+            # alias support
+            if col == "brand" and "manufacturer" in out.columns:
+                col = "manufacturer"
+            if col not in out.columns:
+                logs.append(f"[warn] candidate_filter.include_contains set but missing column={col}; skip")
+                continue
+            needles = [str(x).strip().lower() for x in (vals or ()) if str(x).strip()]
+            if not needles:
+                continue
+            before = int(len(out))
+            s = out[col].fillna("").astype(str).str.lower()
+            keep = pd.Series([False] * len(out), index=out.index)
+            for nd in needles:
+                keep = keep | s.str.contains(nd, na=False)
+            out = out[keep].copy()
+            after = int(len(out))
+            logs.append(
+                f"[include_contains] {col} contains {needles[:10]}{'...' if len(needles) > 10 else ''} kept={after} dropped={before-after}"
+            )
+
+    # min_values (inclusive)
+    mv = getattr(policy.candidate_filter, "min_values", {}) or {}
+    if isinstance(mv, dict) and mv:
+        for col, v in mv.items():
+            col = str(col or "").strip()
+            if not col:
+                continue
+            if col not in out.columns:
+                logs.append(f"[warn] candidate_filter.min_values set but missing column={col}; skip")
+                continue
+            try:
+                th = float(v)
+            except Exception:
+                logs.append(f"[warn] candidate_filter.min_values invalid value for {col}: {v}; skip")
+                continue
+            before = int(len(out))
+            s = pd.to_numeric(out[col], errors="coerce")
+            keep = s.notna() & (s >= th)
+            out = out[keep].copy()
+            after = int(len(out))
+            logs.append(f"[min_values] {col} >= {th} kept={after} dropped={before-after}")
+
     return out
 
 
